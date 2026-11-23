@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quest 3 WebXR 3D Comic Reader</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* 3Dキャンバスは背面に固定 */
+    canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+    /* 操作パネルを確実に最前面に配置 */
+    #ui-overlay {
+      position: relative;
+      z-index: 100;
+      background: rgba(24, 24, 28, 0.95);
+      border: 1px solid #3a3a45;
+      padding: 28px;
+      border-radius: 16px;
+      text-align: center;
+      width: 90%;
+      max-width: 520px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.8);
+    }
+    h1 { font-size: 1.5rem; margin: 0 0 10px 0; color: #fff; }
+    p { font-size: 0.95rem; color: #bbb; margin: 0 0 16px 0; }
+    
+    /* ファイル選択ボタンを大きく押しやすく */
+    .file-label {
+      display: inline-block;
+      background: #2b579a;
+      color: #fff;
+      padding: 14px 24px;
+      border-radius: 8px;
+      font-size: 1.05rem;
+      font-weight: bold;
+      cursor: pointer;
+      width: 100%;
+      margin-bottom: 12px;
+      transition: background 0.2s;
+    }
+    .file-label:hover { background: #366ec2; }
+    input[type="file"] {
+      display: none;
+    }
+
+    #status {
+      margin: 12px 0;
+      padding: 10px;
+      background: #1a1a20;
+      border-radius: 6px;
+      font-weight: bold;
+      color: #4fc3f7;
+      font-size: 0.95rem;
+    }
+
+    /* 自作VR開始ボタン */
+    #enter-vr-btn {
+      width: 100%;
+      padding: 16px;
+      font-size: 1.2rem;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      background: #00c853;
+      color: #000;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: opacity 0.2s;
+    }
+    #enter-vr-btn:disabled {
+      background: #444;
+      color: #888;
+      cursor: not-allowed;
+    }
+
+    .controls-info {
+      text-align: left;
+      font-size: 0.85rem;
+      background: #18181c;
+      padding: 14px;
+      border-radius: 8px;
+      margin-top: 18px;
+      border: 1px solid #2c2c35;
+    }
+    .controls-info strong { color: #81d4fa; }
+    .controls-info ul { margin: 8px 0 0 0; padding-left: 20px; }
+    .controls-info li { margin-bottom: 5px; color: #ddd; }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+
+<div id="ui-overlay">
+  <h1>WebXR 3D コミックリーダー</h1>
+  <p>ローカルのZIPファイルを選択してから、VRモードを起動してください。</p>
+  
+  <label for="zip-input" class="file-label">📁 ZIP / CBZ ファイルを選択する</label>
+  <input type="file" id="zip-input" accept=".zip,.cbz,application/zip,application/x-zip-compressed" />
+  
+  <div id="status">待機中：ファイルが選択されていません</div>
+  
+  <button id="enter-vr-btn" disabled>VRモードで開く (WebXR)</button>
+
+  <div class="controls-info">
+    <strong>【VR内のコントローラー操作】</strong>
+    <ul>
+      <li><strong>右トリガー / Aボタン：</strong> 次の見開き（2ページ進む）</li>
+      <li><strong>左トリガー / Xボタン：</strong> 前の見開き（2ページ戻る）</li>
+      <li><strong>右グリップボタン：</strong> 1ページだけ送る（見開きズレ調整用）</li>
+      <li><strong>右スティック上下：</strong> 3D立体感（奥行き）の強弱</li>
+      <li><strong>右スティック左右：</strong> 画面サイズの拡大・縮小</li>
+      <li><strong>左スティック上下左右：</strong> 画面の位置（上下・左右）移動</li>
+      <li><strong>左グリップ＋左スティック上下：</strong> 前後の距離調整</li>
+      <li><strong>B / Yボタン：</strong> 位置・サイズ・3D深度をリセット</li>
+    </ul>
+  </div>
+</div>
+
+<script type="module">
+  import * as THREE from 'three';
+
+  let scene, camera, renderer;
+  let bookGroup, leftPageMesh, rightPageMesh;
+  let leftMat, rightMat;
+  let imageUrls = [];
+  let currentIndex = 0;
+  let currentSession = null;
+
+  // 調整パラメータ
+  let depthStrength = 0.035;
+  let bookScale = 1.0;
+  const defaultPos = new THREE.Vector3(0, 1.4, -1.8);
+
+  let lastPageTurnTime = 0;
+  const TURN_COOLDOWN = 350;
+
+  const statusEl = document.getElementById('status');
+  const zipInput = document.getElementById('zip-input');
+  const enterVrBtn = document.getElementById('enter-vr-btn');
+  const uiOverlay = document.getElementById('ui-overlay');
+
+  // --- 擬似3D視差シェーダー ---
+  const vertexShader = `
+    varying vec2 vUv;
+    varying vec3 vViewPosition;
+    void main() {
+      vUv = uv;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      vViewPosition = -mvPosition.xyz;
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    uniform sampler2D uMap;
+    uniform float uDepth;
+    uniform float uHasTexture;
+    varying vec2 vUv;
+    varying vec3 vViewPosition;
+
+    float getDepth(vec2 uv) {
+      vec4 tex = texture2D(uMap, uv);
+      float luma = dot(tex.rgb, vec3(0.299, 0.587, 0.114));
+      return 1.0 - luma; 
+    }
+
+    void main() {
+      if (uHasTexture < 0.5) {
+        gl_FragColor = vec4(0.08, 0.08, 0.1, 1.0);
+        return;
+      }
+      vec3 viewDir = normalize(vViewPosition);
+      float height = getDepth(vUv);
+      vec2 parallaxOffset = viewDir.xy * (height * uDepth);
+      vec2 displacedUv = clamp(vUv + parallaxOffset, 0.001, 0.999);
+      gl_FragColor = texture2D(uMap, displacedUv);
+    }
+  `;
+
+  async function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a0c);
+
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.6, 0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // WebXRサポートチェック
+    if ('xr' in navigator) {
+      const supported = await navigator.xr.isSessionSupported('immersive-vr');
+      if (supported) {
+        enterVrBtn.disabled = false;
+        enterVrBtn.textContent = "VRモードで開く (WebXR対応)";
+      } else {
+        enterVrBtn.textContent = "このブラウザ/環境はVR非対応です (HTTPSまたはlocalhostが必要)";
+      }
+    } else {
+      enterVrBtn.textContent = "WebXR APIが見つかりません (HTTPS接続を確認してください)";
+    }
+
+    // 見開きグループ
+    bookGroup = new THREE.Group();
+    bookGroup.position.copy(defaultPos);
+    scene.add(bookGroup);
+
+    const geometry = new THREE.PlaneGeometry(1.0, 1.414, 32, 32);
+
+    leftMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: null },
+        uDepth: { value: depthStrength },
+        uHasTexture: { value: 0.0 }
+      },
+      vertexShader,
+      fragmentShader
+    });
+
+    rightMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: null },
+        uDepth: { value: depthStrength },
+        uHasTexture: { value: 0.0 }
+      },
+      vertexShader,
+      fragmentShader
+    });
+
+    leftPageMesh = new THREE.Mesh(geometry, leftMat);
+    leftPageMesh.position.set(-0.51, 0, 0.04);
+    leftPageMesh.rotation.y = 0.08;
+
+    rightPageMesh = new THREE.Mesh(geometry, rightMat);
+    rightPageMesh.position.set(0.51, 0, 0.04);
+    rightPageMesh.rotation.y = -0.08;
+
+    bookGroup.add(leftPageMesh);
+    bookGroup.add(rightPageMesh);
+
+    const gridHelper = new THREE.GridHelper(10, 20, 0x333333, 0x1a1a1a);
+    scene.add(gridHelper);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    renderer.setAnimationLoop(render);
+  }
+
+  // --- 自作VR開始ボタンの処理 ---
+  enterVrBtn.addEventListener('click', async () => {
+    if (currentSession) {
+      await currentSession.end();
+      return;
+    }
+    try {
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'bounded-floor']
+      });
+      session.addEventListener('end', () => {
+        currentSession = null;
+        uiOverlay.style.display = 'block';
+        enterVrBtn.textContent = "VRモードで開く (WebXR)";
+      });
+      await renderer.xr.setSession(session);
+      currentSession = session;
+      // VR中だけ2DのUIを非表示にする
+      uiOverlay.style.display = 'none';
+    } catch (e) {
+      alert("VRセッションの開始に失敗しました: " + e.message);
+    }
+  });
+
+  // --- ZIPファイル読み込み ---
+  zipInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    statusEl.textContent = `「${file.name}」を解凍中...`;
+    statusEl.style.color = "#ffd54f";
+
+    imageUrls.forEach(url => URL.revokeObjectURL(url));
+    imageUrls = [];
+
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const validFiles = [];
+
+      zip.forEach((relativePath, zipEntry) => {
+        if (!zipEntry.dir && /\.(jpe?g|png|webp|gif)$/i.test(zipEntry.name) && !zipEntry.name.includes('__MACOSX')) {
+          validFiles.push(zipEntry);
+        }
+      });
+
+      validFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+      if (validFiles.length === 0) {
+        statusEl.textContent = "エラー: ZIP内に画像ファイルが見つかりませんでした";
+        statusEl.style.color = "#ff5252";
+        return;
+      }
+
+      for (const entry of validFiles) {
+        const blob = await entry.async('blob');
+        imageUrls.push(URL.createObjectURL(blob));
+      }
+
+      currentIndex = 0;
+      updateSpread();
+      statusEl.textContent = `準備完了！全 ${imageUrls.length} ページ読み込み済み`;
+      statusEl.style.color = "#69f0ae";
+
+    } catch (err) {
+      console.error(err);
+      statusEl.textContent = "ZIPの解凍エラー: " + err.message;
+      statusEl.style.color = "#ff5252";
+    }
+  });
+
+  const textureLoader = new THREE.TextureLoader();
+
+  function updateSpread() {
+    if (imageUrls.length === 0) return;
+
+    // 右ページ
+    if (currentIndex < imageUrls.length) {
+      textureLoader.load(imageUrls[currentIndex], (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        rightMat.uniforms.uMap.value = tex;
+        rightMat.uniforms.uHasTexture.value = 1.0;
+        adjustAspectRatio(rightPageMesh, tex.image);
+      });
+    } else {
+      rightMat.uniforms.uHasTexture.value = 0.0;
+    }
+
+    // 左ページ
+    if (currentIndex + 1 < imageUrls.length) {
+      textureLoader.load(imageUrls[currentIndex + 1], (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        leftMat.uniforms.uMap.value = tex;
+        leftMat.uniforms.uHasTexture.value = 1.0;
+        adjustAspectRatio(leftPageMesh, tex.image);
+      });
+    } else {
+      leftMat.uniforms.uHasTexture.value = 0.0;
+    }
+  }
+
+  function adjustAspectRatio(mesh, img) {
+    if (!img) return;
+    const aspect = img.width / img.height;
+    const baseHeight = 1.414;
+    const newWidth = baseHeight * aspect;
+    mesh.scale.set(newWidth, 1.0, 1.0);
+    
+    if (mesh === rightPageMesh) {
+      mesh.position.x = (newWidth * 0.5) + 0.01;
+    } else {
+      mesh.position.x = -(newWidth * 0.5) - 0.01;
+    }
+  }
+
+  // --- コントローラー操作 ---
+  function handleXRControllers() {
+    const session = renderer.xr.getSession();
+    if (!session) return;
+
+    const now = performance.now();
+
+    for (const source of session.inputSources) {
+      if (!source.gamepad) continue;
+      const gp = source.gamepad;
+      const axes = gp.axes;
+      const buttons = gp.buttons;
+
+      if (source.handedness === 'right') {
+        // 次の見開き（トリガー or Aボタン）
+        if ((buttons[0]?.pressed || buttons[4]?.pressed) && (now - lastPageTurnTime > TURN_COOLDOWN)) {
+          if (currentIndex + 2 < imageUrls.length) {
+            currentIndex += 2;
+            updateSpread();
+            lastPageTurnTime = now;
+          }
+        }
+        // 1ページ送り（右グリップボタン：見開きズレ補正）
+        if (buttons[1]?.pressed && (now - lastPageTurnTime > TURN_COOLDOWN)) {
+          if (currentIndex + 1 < imageUrls.length) {
+            currentIndex += 1;
+            updateSpread();
+            lastPageTurnTime = now;
+          }
+        }
+        // リセット（Bボタン）
+        if (buttons[5]?.pressed) resetTransform();
+
+        // 3D深度（右スティック上下）
+        if (Math.abs(axes[3]) > 0.15) {
+          depthStrength = THREE.MathUtils.clamp(depthStrength - axes[3] * 0.001, 0.0, 0.15);
+          leftMat.uniforms.uDepth.value = depthStrength;
+          rightMat.uniforms.uDepth.value = depthStrength;
+        }
+        // サイズ（右スティック左右）
+        if (Math.abs(axes[2]) > 0.15) {
+          bookScale = THREE.MathUtils.clamp(bookScale + axes[2] * 0.02, 0.3, 3.5);
+          bookGroup.scale.setScalar(bookScale);
+        }
+      }
+
+      if (source.handedness === 'left') {
+        // 前の見開き（トリガー or Xボタン）
+        if ((buttons[0]?.pressed || buttons[4]?.pressed) && (now - lastPageTurnTime > TURN_COOLDOWN)) {
+          if (currentIndex - 2 >= 0) {
+            currentIndex -= 2;
+            updateSpread();
+            lastPageTurnTime = now;
+          } else if (currentIndex === 1) {
+            currentIndex = 0;
+            updateSpread();
+            lastPageTurnTime = now;
+          }
+        }
+        // リセット（Yボタン）
+        if (buttons[5]?.pressed) resetTransform();
+
+        // 位置移動（左スティック）
+        if (Math.abs(axes[3]) > 0.15) {
+          if (buttons[1]?.pressed) {
+            bookGroup.position.z += axes[3] * 0.03;
+          } else {
+            bookGroup.position.y -= axes[3] * 0.02;
+          }
+        }
+        if (Math.abs(axes[2]) > 0.15) {
+          bookGroup.position.x += axes[2] * 0.02;
+        }
+      }
+    }
+  }
+
+  function resetTransform() {
+    depthStrength = 0.035;
+    bookScale = 1.0;
+    bookGroup.position.copy(defaultPos);
+    bookGroup.scale.setScalar(1.0);
+    leftMat.uniforms.uDepth.value = depthStrength;
+    rightMat.uniforms.uDepth.value = depthStrength;
+  }
+
+  function render() {
+    handleXRControllers();
+    renderer.render(scene, camera);
+  }
+
+  init();
+</script>
+</body>
+</html>
