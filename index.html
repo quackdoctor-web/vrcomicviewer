@@ -1,0 +1,1578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quest 3 WebXR 3D Comic Reader</title>
+  <!-- Tailwind CSS for clean, modern 2D Launcher UI -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <!-- JSZip for local client-side archive extraction -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <!-- Three.js Import Map -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3"
+      }
+    }
+  </script>
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: #09090b;
+      color: #f4f4f5;
+      margin: 0;
+      overflow-x: hidden;
+    }
+    /* Ensure WebGL canvas stays strictly inside its container and never covers the 2D UI */
+    #preview-stage canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+      outline: none;
+    }
+    /* Custom range slider styling */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      background: #27272a;
+      height: 6px;
+      border-radius: 999px;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #38bdf8;
+      cursor: pointer;
+      border: 2px solid #09090b;
+      transition: transform 0.15s ease;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.15);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col lg:flex-row bg-zinc-950 text-zinc-100 select-none">
+
+  <!-- LEFT / TOP SIDEBAR: 2D Launcher & Control Panel (Always visible, never obscured) -->
+  <aside id="launcher-sidebar" class="w-full lg:w-[400px] xl:w-[430px] shrink-0 bg-zinc-900/95 border-b lg:border-b-0 lg:border-r border-zinc-800 flex flex-col z-20 shadow-2xl">
+    <!-- Header -->
+    <div class="p-5 border-b border-zinc-800 flex items-center justify-between">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="inline-block w-2.5 h-2.5 rounded-full bg-sky-400 animate-pulse"></span>
+          <h1 class="text-lg font-bold tracking-tight text-white">WebXR 3D Comic Reader</h1>
+        </div>
+        <p class="text-xs text-zinc-400 mt-0.5">Meta Quest 3 Stereoscopic Spatial Viewer</p>
+      </div>
+      <span id="xr-badge" class="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
+        Checking XR...
+      </span>
+    </div>
+
+    <!-- Scrollable Controls Area -->
+    <div class="p-5 space-y-5 overflow-y-auto flex-1">
+      <!-- Primary VR Launch CTA -->
+      <div class="space-y-2">
+        <button id="enter-vr-btn" disabled
+          class="w-full py-3.5 px-4 rounded-xl font-bold text-sm tracking-wide uppercase transition-all flex items-center justify-center gap-2.5 bg-zinc-800 text-zinc-500 cursor-not-allowed shadow-lg">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+          </svg>
+          <span id="enter-vr-text">Checking WebXR Support...</span>
+        </button>
+        <div id="status-banner" class="text-xs px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-sky-400 font-medium flex items-center justify-between">
+          <span id="status-text">Ready — Load a ZIP/CBZ or Demo Comic</span>
+          <span id="page-badge" class="text-zinc-400 font-mono">0 / 0</span>
+        </div>
+        <div id="ai-progress-bar" class="text-[11px] px-3 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 text-zinc-400 flex items-center justify-between gap-2">
+          <span id="ai-model-status" class="truncate">AI Engine: Depth Anything V2 (Standby)</span>
+          <span id="page-depth-status" class="font-mono text-amber-300 shrink-0">Depth: --</span>
+        </div>
+      </div>
+
+      <!-- File Loader & Drag-and-Drop Zone -->
+      <div id="drop-zone" class="rounded-xl border-2 border-dashed border-zinc-700 hover:border-sky-500/70 bg-zinc-950/60 p-4 transition-colors text-center space-y-3">
+        <input type="file" id="zip-input" accept=".zip,.cbz,application/zip,application/x-zip-compressed" class="hidden" />
+        <div class="flex flex-col sm:flex-row gap-2">
+          <label for="zip-input"
+            class="flex-1 py-2.5 px-3 rounded-lg bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold text-xs cursor-pointer transition-colors flex items-center justify-center gap-1.5 shadow">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+            Select ZIP / CBZ
+          </label>
+          <button id="demo-btn" type="button"
+            class="py-2.5 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs border border-zinc-700 transition-colors flex items-center justify-center gap-1.5">
+            <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+            Load Demo Comic
+          </button>
+        </div>
+        <p class="text-[11px] text-zinc-500">100% local browser extraction. Drag &amp; drop a .zip or .cbz archive here.</p>
+      </div>
+
+      <!-- Navigation & Layout Controls -->
+      <div class="bg-zinc-950/70 rounded-xl p-4 border border-zinc-800/90 space-y-4">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">Page &amp; Layout</span>
+          <button id="shift-btn" type="button" title="Shift spread alignment by 1 page"
+            class="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-amber-300 border border-zinc-700 transition">
+            +1 Page Offset
+          </button>
+        </div>
+
+        <!-- Page Slider -->
+        <div class="space-y-1.5">
+          <div class="flex justify-between text-xs text-zinc-400">
+            <span>Page Scrubber</span>
+            <span id="slider-label" class="font-mono text-zinc-200">Page 0 / 0</span>
+          </div>
+          <input type="range" id="page-slider" min="0" max="0" value="0" class="w-full" disabled />
+        </div>
+
+        <!-- Prev / Next Buttons -->
+        <div class="grid grid-cols-2 gap-2">
+          <button id="prev-btn" type="button"
+            class="py-2 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 active:scale-[0.99] text-xs font-semibold text-zinc-200 border border-zinc-700 transition">
+            ◀ Prev Spread
+          </button>
+          <button id="next-btn" type="button"
+            class="py-2 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 active:scale-[0.99] text-xs font-semibold text-zinc-200 border border-zinc-700 transition">
+            Next Spread ▶
+          </button>
+        </div>
+
+        <!-- Reading Direction & View Mode Toggles -->
+        <div class="grid grid-cols-2 gap-2">
+          <div class="space-y-1">
+            <label for="dir-select" class="block text-[11px] font-medium text-zinc-400">Reading Direction</label>
+            <select id="dir-select"
+              class="w-full py-2 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs font-semibold text-sky-300 border border-zinc-700/80 focus:outline-none focus:border-sky-400 transition cursor-pointer">
+              <option value="rtl" selected>右開き (R→L Manga)</option>
+              <option value="ltr">左開き (L→R Comic)</option>
+            </select>
+          </div>
+          <div class="space-y-1">
+            <label for="view-select" class="block text-[11px] font-medium text-zinc-400">View Mode</label>
+            <select id="view-select"
+              class="w-full py-2 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs font-semibold text-emerald-300 border border-zinc-700/80 focus:outline-none focus:border-emerald-400 transition cursor-pointer">
+              <option value="spread" selected>見開き (2-Page Spread)</option>
+              <option value="single">単ページ (Single Page)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- AI Depth Mode & Depth Map Inspection -->
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <div class="space-y-1">
+            <label for="ai-mode-select" class="block text-[11px] font-medium text-zinc-400">AI Depth Mode</label>
+            <select id="ai-mode-select"
+              class="w-full py-2 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs font-semibold text-fuchsia-300 border border-zinc-700/80 focus:outline-none focus:border-fuchsia-400 transition cursor-pointer">
+              <option value="ai" selected>AI Depth Anything V2</option>
+              <option value="heuristic">Smart Fallback</option>
+            </select>
+          </div>
+          <div class="space-y-1">
+            <label class="block text-[11px] font-medium text-zinc-400">Depth Visualization</label>
+            <button id="depth-map-toggle-btn" type="button"
+              class="w-full py-2 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs font-semibold text-amber-300 border border-zinc-700/80 transition cursor-pointer">
+              3D Render: OFF (Map)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stereoscopic 3D & Spatial Adjustments -->
+      <div class="bg-zinc-950/70 rounded-xl p-4 border border-zinc-800/90 space-y-3.5">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">3D Stereoscopic Shader</span>
+          <button id="reset-btn" type="button"
+            class="text-[11px] font-medium px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700">
+            Reset View
+          </button>
+        </div>
+
+        <div class="space-y-1">
+          <div class="flex justify-between text-xs">
+            <span class="text-zinc-400">3D Parallax Depth</span>
+            <span id="depth-val" class="font-mono text-sky-400">0.045</span>
+          </div>
+          <input type="range" id="depth-slider" min="0" max="0.14" step="0.005" value="0.045" class="w-full" />
+        </div>
+
+        <div class="space-y-1">
+          <div class="flex justify-between text-xs">
+            <span class="text-zinc-400">Book Scale</span>
+            <span id="scale-val" class="font-mono text-sky-400">1.00x</span>
+          </div>
+          <input type="range" id="scale-slider" min="0.4" max="2.5" step="0.05" value="1.0" class="w-full" />
+        </div>
+      </div>
+
+      <!-- Quest 3 Controller Reference Accordion / Card -->
+      <div class="bg-zinc-950/50 rounded-xl p-3.5 border border-zinc-800/80 text-[11px] text-zinc-400 space-y-1.5">
+        <div class="font-semibold text-zinc-200 flex items-center justify-between">
+          <span>Quest 3 VR Controller Shortcuts</span>
+          <span class="text-sky-400">+ Laser Pointer UI</span>
+        </div>
+        <ul class="space-y-1 leading-relaxed">
+          <li><strong class="text-zinc-200">R-Trigger / A:</strong> Next Spread &nbsp;|&nbsp; <strong class="text-zinc-200">L-Trigger / X:</strong> Prev Spread</li>
+          <li><strong class="text-zinc-200">R-Grip:</strong> +1 Page Shift (Fix Spread Alignment)</li>
+          <li><strong class="text-zinc-200">R-Stick Up/Down:</strong> 3D Depth &nbsp;|&nbsp; <strong class="text-zinc-200">Left/Right:</strong> Scale</li>
+          <li><strong class="text-zinc-200">L-Stick:</strong> Move X/Y &nbsp;|&nbsp; <strong class="text-zinc-200">L-Grip + L-Stick Y:</strong> Distance Z</li>
+          <li><strong class="text-zinc-200">B Button:</strong> Reset Transform &nbsp;|&nbsp; <strong class="text-zinc-200">Y Button:</strong> Toggle 3D UI</li>
+        </ul>
+      </div>
+    </div>
+  </aside>
+
+  <!-- RIGHT / MAIN AREA: Live 3D WebGL Preview Canvas -->
+  <main id="preview-stage" class="relative flex-1 min-h-[380px] lg:min-h-screen bg-zinc-950 overflow-hidden">
+    <!-- Subtle Overlay Hint in 2D Preview -->
+    <div class="absolute top-4 left-4 right-4 z-10 pointer-events-none flex flex-wrap items-center justify-between gap-2">
+      <div class="px-3 py-1.5 rounded-lg bg-zinc-900/80 backdrop-blur border border-zinc-800 text-xs text-zinc-300">
+        Live 3D Preview — Drag mouse / touch to inspect stereo parallax angle
+      </div>
+      <div id="preview-spread-indicator" class="px-3 py-1.5 rounded-lg bg-zinc-900/80 backdrop-blur border border-zinc-800 text-xs font-mono text-sky-400">
+        No Comic Loaded
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { pipeline, RawImage } from '@huggingface/transformers';
+
+    // =========================================================================
+    // 1. APPLICATION STATE & PER-PAGE DEPTH CACHE
+    // =========================================================================
+    const state = {
+      pages: [],              // Array of { url, name, depthCanvas, depthUrl, depthTex, depthStatus }
+      currentIndex: 0,        // Index of the first active page in current view
+      rtl: true,              // true = Right-to-Left (Japanese Manga), false = Left-to-Right
+      spreadMode: true,       // true = 2-page spread, false = single page
+      aiMode: 'ai',           // 'ai' (Depth Anything V2) or 'heuristic' (Smart Fallback)
+      showDepthMap: false,    // false = 3D Shaded Comic, true = Raw Depth Map inspection
+      depthStrength: 0.055,   // Stereoscopic POM + mesh displacement depth
+      bookScale: 1.0,         // Book scale multiplier
+      bookPos: new THREE.Vector3(0, 1.45, -1.75),
+      vrUiVisible: true,      // Toggle for floating 3D spatial UI panel
+      isPresenting: false,
+      lastTurnTime: 0,
+      turnCooldown: 320,
+      aiPipeline: null,
+      aiBackend: null,
+      aiLoadingPromise: null,
+      aiFailed: false
+    };
+
+    const DEFAULT_POS = new THREE.Vector3(0, 1.45, -1.75);
+
+    // =========================================================================
+    // 2. DOM REFERENCES
+    // =========================================================================
+    const previewStage = document.getElementById('preview-stage');
+    const enterVrBtn = document.getElementById('enter-vr-btn');
+    const enterVrText = document.getElementById('enter-vr-text');
+    const xrBadge = document.getElementById('xr-badge');
+    const statusText = document.getElementById('status-text');
+    const pageBadge = document.getElementById('page-badge');
+    const aiModelStatus = document.getElementById('ai-model-status');
+    const pageDepthStatus = document.getElementById('page-depth-status');
+    const previewIndicator = document.getElementById('preview-spread-indicator');
+    const zipInput = document.getElementById('zip-input');
+    const dropZone = document.getElementById('drop-zone');
+    const demoBtn = document.getElementById('demo-btn');
+    const pageSlider = document.getElementById('page-slider');
+    const sliderLabel = document.getElementById('slider-label');
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+    const shiftBtn = document.getElementById('shift-btn');
+    const dirSelect = document.getElementById('dir-select');
+    const viewSelect = document.getElementById('view-select');
+    const aiModeSelect = document.getElementById('ai-mode-select');
+    const depthMapToggleBtn = document.getElementById('depth-map-toggle-btn');
+    const depthSlider = document.getElementById('depth-slider');
+    const depthVal = document.getElementById('depth-val');
+    const scaleSlider = document.getElementById('scale-slider');
+    const scaleVal = document.getElementById('scale-val');
+    const resetBtn = document.getElementById('reset-btn');
+
+    // =========================================================================
+    // 3. THREE.JS & WEBXR SCENE SETUP
+    // =========================================================================
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x09090b);
+
+    const camera = new THREE.PerspectiveCamera(65, 1, 0.05, 100);
+    camera.position.set(0, 1.55, 0.25);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.xr.enabled = true;
+    previewStage.appendChild(renderer.domElement);
+
+    // Subtle ambient environment grid & lighting cues
+    const grid = new THREE.GridHelper(12, 24, 0x27272a, 0x141417);
+    grid.position.y = 0;
+    scene.add(grid);
+
+    // =========================================================================
+    // 4. AI MONOCULAR DEPTH ESTIMATION (DEPTH ANYTHING V2) + SMART FALLBACK
+    // =========================================================================
+    async function ensureDepthPipeline() {
+      if (state.aiMode === 'heuristic' || state.aiFailed) return null;
+      if (state.aiPipeline) return state.aiPipeline;
+      if (state.aiLoadingPromise) return state.aiLoadingPromise;
+
+      state.aiLoadingPromise = (async () => {
+        try {
+          const hasWebGpu = typeof navigator !== 'undefined' && !!navigator.gpu;
+          const preferredDevice = hasWebGpu ? 'webgpu' : 'wasm';
+          aiModelStatus.textContent = `AI Engine: Loading Depth Anything V2 (${preferredDevice.toUpperCase()})...`;
+          aiModelStatus.className = 'truncate text-sky-300';
+
+          let pipe;
+          try {
+            pipe = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', {
+              device: preferredDevice
+            });
+            state.aiBackend = preferredDevice.toUpperCase();
+          } catch (gpuErr) {
+            if (preferredDevice === 'webgpu') {
+              aiModelStatus.textContent = 'AI Engine: WebGPU fallback -> WASM...';
+              pipe = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', {
+                device: 'wasm'
+              });
+              state.aiBackend = 'WASM';
+            } else {
+              throw gpuErr;
+            }
+          }
+
+          state.aiPipeline = pipe;
+          aiModelStatus.textContent = `AI Engine: Depth Anything V2 (${state.aiBackend} Ready)`;
+          aiModelStatus.className = 'truncate text-emerald-400';
+          return pipe;
+        } catch (err) {
+          console.warn('Depth Anything V2 unavailable, falling back to Smart Heuristic Depth:', err);
+          state.aiFailed = true;
+          aiModelStatus.textContent = 'AI Engine: Offline/Blocked -> Smart Fallback Active';
+          aiModelStatus.className = 'truncate text-amber-300';
+          return null;
+        } finally {
+          state.aiLoadingPromise = null;
+        }
+      })();
+
+      return state.aiLoadingPromise;
+    }
+
+    function computeHeuristicDepthCanvas(img) {
+      const w = Math.min(384, img.naturalWidth || img.width || 384);
+      const h = Math.max(1, Math.round(w * ((img.naturalHeight || img.height || 512) / (img.naturalWidth || img.width || 384))));
+
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = w;
+      srcCanvas.height = h;
+      const srcCtx = srcCanvas.getContext('2d');
+      srcCtx.drawImage(img, 0, 0, w, h);
+      const srcData = srcCtx.getImageData(0, 0, w, h).data;
+
+      const luma = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const idx = i * 4;
+        luma[i] = (0.299 * srcData[idx] + 0.587 * srcData[idx + 1] + 0.114 * srcData[idx + 2]) / 255;
+      }
+
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = w;
+      outCanvas.height = h;
+      const outCtx = outCanvas.getContext('2d');
+      const outImg = outCtx.createImageData(w, h);
+      const outData = outImg.data;
+
+      for (let y = 0; y < h; y++) {
+        const ny = (y / Math.max(1, h - 1)) * 2 - 1;
+        for (let x = 0; x < w; x++) {
+          const nx = (x / Math.max(1, w - 1)) * 2 - 1;
+          const idx = y * w + x;
+          const c = luma[idx];
+
+          const xl = Math.max(0, x - 1), xr = Math.min(w - 1, x + 1);
+          const yu = Math.max(0, y - 1), yd = Math.min(h - 1, y + 1);
+          const gx = luma[y * w + xr] - luma[y * w + xl];
+          const gy = luma[yd * w + x] - luma[yu * w + x];
+          const edge = Math.min(1, Math.hypot(gx, gy) * 2.2);
+
+          // Darker comic ink & strong lineart pop forward; subtle foreground center bias
+          const inkRelief = Math.pow(Math.max(0, 1 - c), 1.35);
+          const centerBias = Math.max(0, 1 - (nx * nx * 0.25 + ny * ny * 0.2));
+          const depthVal01 = Math.min(1, Math.max(0, inkRelief * 0.68 + edge * 0.24 + centerBias * 0.08));
+          const byteVal = Math.round(depthVal01 * 255);
+
+          const p = idx * 4;
+          outData[p] = byteVal;
+          outData[p + 1] = byteVal;
+          outData[p + 2] = byteVal;
+          outData[p + 3] = 255;
+        }
+      }
+
+      outCtx.putImageData(outImg, 0, 0);
+      return outCanvas;
+    }
+
+    async function generateDepthForPage(pageObj) {
+      if (!pageObj) return;
+      if (pageObj.depthCanvas && (
+        (state.aiMode === 'ai' && !state.aiFailed && pageObj.depthStatus === 'ai') ||
+        ((state.aiMode === 'heuristic' || state.aiFailed) && pageObj.depthStatus === 'heuristic')
+      )) {
+        return;
+      }
+
+      pageObj.depthStatus = 'generating';
+      updateDepthStatusUI();
+
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = pageObj.url;
+      });
+
+      let depthCanvas = null;
+      let statusTag = 'heuristic';
+
+      if (state.aiMode === 'ai' && !state.aiFailed) {
+        const pipe = await ensureDepthPipeline();
+        if (pipe) {
+          try {
+            const rawImg = await RawImage.fromURL(pageObj.url);
+            const result = await pipe(rawImg);
+            const depthRaw = result?.depth;
+            if (depthRaw && depthRaw.data && depthRaw.width && depthRaw.height) {
+              const dw = depthRaw.width;
+              const dh = depthRaw.height;
+              let minV = Infinity, maxV = -Infinity;
+              for (let i = 0; i < depthRaw.data.length; i++) {
+                const v = depthRaw.data[i];
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+              }
+              const span = Math.max(1e-6, maxV - minV);
+
+              const rawCanvas = document.createElement('canvas');
+              rawCanvas.width = dw;
+              rawCanvas.height = dh;
+              const rCtx = rawCanvas.getContext('2d');
+              const rImg = rCtx.createImageData(dw, dh);
+              for (let i = 0; i < dw * dh; i++) {
+                const norm = (depthRaw.data[i] - minV) / span;
+                const b = Math.round(Math.min(1, Math.max(0, norm)) * 255);
+                rImg.data[i * 4] = b;
+                rImg.data[i * 4 + 1] = b;
+                rImg.data[i * 4 + 2] = b;
+                rImg.data[i * 4 + 3] = 255;
+              }
+              rCtx.putImageData(rImg, 0, 0);
+
+              // Smooth & upscale depth map to match comic aspect cleanly
+              const targetW = Math.min(512, img.naturalWidth || 512);
+              const targetH = Math.max(1, Math.round(targetW * ((img.naturalHeight || 724) / (img.naturalWidth || 512))));
+              const smoothCanvas = document.createElement('canvas');
+              smoothCanvas.width = targetW;
+              smoothCanvas.height = targetH;
+              const sCtx = smoothCanvas.getContext('2d');
+              sCtx.filter = 'blur(1.5px)';
+              sCtx.drawImage(rawCanvas, 0, 0, targetW, targetH);
+              sCtx.filter = 'none';
+
+              depthCanvas = smoothCanvas;
+              statusTag = 'ai';
+            }
+          } catch (inferErr) {
+            console.warn('AI depth inference failed for page, using smart heuristic:', inferErr);
+          }
+        }
+      }
+
+      if (!depthCanvas) {
+        depthCanvas = computeHeuristicDepthCanvas(img);
+        statusTag = 'heuristic';
+      }
+
+      if (pageObj.depthTex) {
+        pageObj.depthTex.dispose();
+      }
+      const dTex = new THREE.CanvasTexture(depthCanvas);
+      dTex.colorSpace = THREE.NoColorSpace;
+      dTex.minFilter = THREE.LinearFilter;
+      dTex.magFilter = THREE.LinearFilter;
+      dTex.needsUpdate = true;
+
+      pageObj.depthCanvas = depthCanvas;
+      pageObj.depthTex = dTex;
+      pageObj.depthStatus = statusTag;
+
+      updateSpreadDisplay();
+      updateDepthStatusUI();
+    }
+
+    function updateDepthStatusUI() {
+      const total = state.pages.length;
+      if (total === 0) {
+        pageDepthStatus.textContent = 'Depth: --';
+        pageDepthStatus.className = 'font-mono text-zinc-400 shrink-0';
+        return;
+      }
+      const p1 = state.pages[state.currentIndex];
+      const p2 = state.spreadMode ? state.pages[state.currentIndex + 1] : null;
+      const s1 = p1?.depthStatus || 'pending';
+      const s2 = p2 ? (p2.depthStatus || 'pending') : null;
+      const combined = s2 && s2 !== s1 ? `${s1}/${s2}` : s1;
+      pageDepthStatus.textContent = `Depth: ${combined.toUpperCase()}`;
+      pageDepthStatus.className = combined.includes('ai')
+        ? 'font-mono text-emerald-400 shrink-0'
+        : 'font-mono text-amber-300 shrink-0';
+    }
+
+    // =========================================================================
+    // 5. HIGH-PRECISION RELIEF / PARALLAX OCCLUSION & NORMAL-BASED LIGHTING SHADER
+    // =========================================================================
+    const pageVertexShader = /* glsl */ `
+      uniform sampler2D uDepthMap;
+      uniform float uHasDepth;
+      uniform float uDepth;
+      uniform float uCurve;
+      uniform float uSide; // -1.0 for left page, +1.0 for right page, 0.0 for single
+      varying vec2 vUv;
+      varying vec3 vViewPosition;
+      varying vec3 vWorldPos;
+
+      void main() {
+        vUv = uv;
+        vec3 pos = position;
+
+        // Physical page curvature toward center spine
+        float edgeMask = sin(clamp(uv.y, 0.0, 1.0) * 3.14159265);
+        float bendProfile = 0.0;
+        if (abs(uSide) > 0.5) {
+          float spineCoord = (uSide > 0.0) ? uv.x : (1.0 - uv.x);
+          bendProfile = sin(clamp(spineCoord, 0.0, 1.0) * 3.14159265) * (0.7 + 0.3 * edgeMask);
+        } else {
+          bendProfile = sin(clamp(uv.x, 0.0, 1.0) * 3.14159265) * (0.55 + 0.45 * edgeMask);
+        }
+        pos.z += bendProfile * uCurve;
+
+        // 3D Vertex Mesh Displacement driven by AI / Heuristic Depth Map
+        if (uHasDepth > 0.5) {
+          float d = texture2D(uDepthMap, uv).r;
+          pos.z += (d - 0.35) * (uDepth * 1.45);
+        }
+
+        vec4 worldPosition = modelMatrix * vec4(pos, 1.0);
+        vWorldPos = worldPosition.xyz;
+        vec4 mvPosition = viewMatrix * worldPosition;
+        vViewPosition = -mvPosition.xyz;
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `;
+
+    const pageFragmentShader = /* glsl */ `
+      uniform sampler2D uMap;
+      uniform sampler2D uDepthMap;
+      uniform float uDepth;
+      uniform float uHasTexture;
+      uniform float uHasDepth;
+      uniform float uShowDepthMap;
+      uniform float uSide;
+      uniform vec2 uTexelSize;
+      varying vec2 vUv;
+      varying vec3 vViewPosition;
+      varying vec3 vWorldPos;
+
+      float getLuma(vec2 uv) {
+        return dot(texture2D(uMap, clamp(uv, 0.001, 0.999)).rgb, vec3(0.299, 0.587, 0.114));
+      }
+
+      // Unified height sample: uses AI / Heuristic Depth Map when available, with edge refinement
+      float sampleHeight(vec2 uv) {
+        vec2 cUv = clamp(uv, 0.001, 0.999);
+        if (uHasDepth > 0.5) {
+          float aiD = texture2D(uDepthMap, cUv).r;
+          vec2 dx = vec2(max(uTexelSize.x * 2.0, 0.002), 0.0);
+          vec2 dy = vec2(0.0, max(uTexelSize.y * 2.0, 0.002));
+          float edgeInk = abs(getLuma(cUv + dx) - getLuma(cUv - dx)) + abs(getLuma(cUv + dy) - getLuma(cUv - dy));
+          return clamp(aiD * 0.90 + edgeInk * 0.14, 0.0, 1.0);
+        }
+
+        float c = getLuma(cUv);
+        vec2 dx = vec2(max(uTexelSize.x * 2.5, 0.0015), 0.0);
+        vec2 dy = vec2(0.0, max(uTexelSize.y * 2.5, 0.0015));
+        float gx = (getLuma(cUv + dx + dy) + 2.0 * getLuma(cUv + dx) + getLuma(cUv + dx - dy))
+                 - (getLuma(cUv - dx + dy) + 2.0 * getLuma(cUv - dx) + getLuma(cUv - dx - dy));
+        float gy = (getLuma(cUv - dx + dy) + 2.0 * getLuma(cUv + dy) + getLuma(cUv + dx + dy))
+                 - (getLuma(cUv - dx - dy) + 2.0 * getLuma(cUv - dy) + getLuma(cUv + dx - dy));
+        float edgeMag = clamp(length(vec2(gx, gy)) * 1.35, 0.0, 1.0);
+        float inkDepth = 1.0 - smoothstep(0.18, 0.94, c);
+        return clamp(inkDepth * 0.75 + edgeMag * 0.25, 0.0, 1.0);
+      }
+
+      // Compute normal from depth field for realistic rim & directional shading
+      vec3 computeDepthNormal(vec2 uv, float centerH) {
+        vec2 eps = vec2(max(uTexelSize.x * 2.0, 0.002), max(uTexelSize.y * 2.0, 0.002));
+        float hR = sampleHeight(uv + vec2(eps.x, 0.0));
+        float hU = sampleHeight(uv + vec2(0.0, eps.y));
+        float scale = uDepth * 28.0;
+        vec3 n = normalize(vec3(-(hR - centerH) * scale, -(hU - centerH) * scale, 1.0));
+        return n;
+      }
+
+      // Viridis/Turbo-inspired scientific depth visualization when inspecting depth map
+      vec3 depthHeatmap(float h) {
+        vec3 c0 = vec3(0.05, 0.07, 0.22);
+        vec3 c1 = vec3(0.08, 0.52, 0.78);
+        vec3 c2 = vec3(0.20, 0.85, 0.55);
+        vec3 c3 = vec3(0.98, 0.85, 0.20);
+        if (h < 0.33) return mix(c0, c1, h / 0.33);
+        if (h < 0.67) return mix(c1, c2, (h - 0.33) / 0.34);
+        return mix(c2, c3, (h - 0.67) / 0.33);
+      }
+
+      void main() {
+        if (uHasTexture < 0.5) {
+          gl_FragColor = vec4(0.07, 0.07, 0.09, 1.0);
+          return;
+        }
+
+        if (uShowDepthMap > 0.5) {
+          float rawH = sampleHeight(vUv);
+          gl_FragColor = vec4(depthHeatmap(rawH), 1.0);
+          return;
+        }
+
+        // High-precision 8-step Parallax Occlusion Mapping (POM)
+        vec3 viewDir = normalize(vViewPosition);
+        vec2 parallaxDir = viewDir.xy;
+        const int STEPS = 8;
+        float dt = 1.0 / float(STEPS);
+        float hStart = sampleHeight(vUv);
+        vec2 maxShift = parallaxDir * (uDepth * 1.15);
+
+        float accumH = 0.0;
+        float shadowAcc = 0.0;
+        for (int i = 1; i <= STEPS; i++) {
+          float t = float(i) * dt;
+          vec2 sampleUv = clamp(vUv + maxShift * (t - 0.5), 0.002, 0.998);
+          float hS = sampleHeight(sampleUv);
+          accumH += hS * dt;
+
+          // Relief occlusion shadow when higher depth sits along view ray
+          if (hS > hStart + 0.04) {
+            shadowAcc += (hS - hStart) * 0.28;
+          }
+        }
+
+        vec2 finalUv = clamp(vUv + parallaxDir * (accumH * uDepth * 1.15), 0.002, 0.998);
+        vec3 albedo = texture2D(uMap, finalUv).rgb;
+
+        // Normal-based directional lighting & rim highlights
+        float finalH = sampleHeight(finalUv);
+        vec3 n = computeDepthNormal(finalUv, finalH);
+        vec3 lightDir = normalize(vec3(0.35, 0.55, 0.76));
+        float ndotl = clamp(dot(n, lightDir), 0.0, 1.0);
+        float rim = pow(1.0 - clamp(dot(n, normalize(vec3(viewDir.xy, 0.9))), 0.0, 1.0), 2.6) * finalH;
+
+        // Spine / gutter ambient occlusion in spread mode
+        float gutterAO = 1.0;
+        if (abs(uSide) > 0.5) {
+          float distFromGutter = (uSide > 0.0) ? vUv.x : (1.0 - vUv.x);
+          gutterAO = mix(0.64, 1.0, smoothstep(0.0, 0.09, distFromGutter));
+        }
+
+        vec3 lit = albedo * mix(0.84, 1.14, ndotl) * gutterAO * (1.0 - clamp(shadowAcc, 0.0, 0.38)) + vec3(rim * 0.22);
+        gl_FragColor = vec4(clamp(lit, 0.0, 1.0), 1.0);
+      }
+    `;
+
+    function createPageMaterial(sideValue) {
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uMap: { value: null },
+          uDepthMap: { value: null },
+          uDepth: { value: state.depthStrength },
+          uHasTexture: { value: 0.0 },
+          uHasDepth: { value: 0.0 },
+          uShowDepthMap: { value: 0.0 },
+          uCurve: { value: 0.045 },
+          uSide: { value: sideValue },
+          uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1448) }
+        },
+        vertexShader: pageVertexShader,
+        fragmentShader: pageFragmentShader
+      });
+    }
+
+    // Book Group, High-Density Displaced Page Meshes & 3D Physical Paper Thickness Edges
+    const bookGroup = new THREE.Group();
+    bookGroup.position.copy(state.bookPos);
+    scene.add(bookGroup);
+
+    const PAGE_HEIGHT = 1.414;
+    const PAPER_THICKNESS = 0.014;
+    const pageGeo = new THREE.PlaneGeometry(1.0, PAGE_HEIGHT, 96, 96);
+    const edgeMat = new THREE.MeshBasicMaterial({ color: 0xe4e4e7 });
+
+    function createPhysicalPage(sideValue) {
+      const mat = createPageMaterial(sideValue);
+      const sheetGroup = new THREE.Group();
+      const frontMesh = new THREE.Mesh(pageGeo, mat);
+      const backMesh = new THREE.Mesh(pageGeo, mat);
+      backMesh.rotation.y = Math.PI;
+      backMesh.position.z = -PAPER_THICKNESS;
+
+      // Thin 3D paper thickness strips along top, bottom, and outer edge
+      const topEdge = new THREE.Mesh(new THREE.BoxGeometry(1.0, PAPER_THICKNESS, PAPER_THICKNESS), edgeMat);
+      topEdge.position.set(0, PAGE_HEIGHT * 0.5, -PAPER_THICKNESS * 0.5);
+
+      const bottomEdge = new THREE.Mesh(new THREE.BoxGeometry(1.0, PAPER_THICKNESS, PAPER_THICKNESS), edgeMat);
+      bottomEdge.position.set(0, -PAGE_HEIGHT * 0.5, -PAPER_THICKNESS * 0.5);
+
+      const outerEdge = new THREE.Mesh(new THREE.BoxGeometry(PAPER_THICKNESS, PAGE_HEIGHT, PAPER_THICKNESS), edgeMat);
+      outerEdge.position.set(sideValue >= 0 ? 0.5 : -0.5, 0, -PAPER_THICKNESS * 0.5);
+
+      sheetGroup.add(frontMesh, backMesh, topEdge, bottomEdge, outerEdge);
+      return { sheetGroup, frontMesh, mat };
+    }
+
+    const leftPage = createPhysicalPage(-1.0);
+    const rightPage = createPhysicalPage(1.0);
+    const leftPageMesh = leftPage.sheetGroup;
+    const rightPageMesh = rightPage.sheetGroup;
+    const leftMat = leftPage.mat;
+    const rightMat = rightPage.mat;
+
+    bookGroup.add(leftPageMesh);
+    bookGroup.add(rightPageMesh);
+
+    // =========================================================================
+    // 5. FLOATING 3D SPATIAL VR UI PANEL (Interactive via Laser Pointer)
+    // =========================================================================
+    const vrUiGroup = new THREE.Group();
+    vrUiGroup.position.set(0, 0.72, -1.35);
+    vrUiGroup.rotation.x = -0.38; // Tilted ergonomically upward toward the user
+    scene.add(vrUiGroup);
+
+    const uiCanvas = document.createElement('canvas');
+    uiCanvas.width = 1280;
+    uiCanvas.height = 440;
+    const uiCtx = uiCanvas.getContext('2d');
+    const uiTexture = new THREE.CanvasTexture(uiCanvas);
+    uiTexture.colorSpace = THREE.SRGBColorSpace;
+    uiTexture.anisotropy = 4;
+
+    const uiPlaneGeo = new THREE.PlaneGeometry(1.28, 0.44);
+    const uiPlaneMat = new THREE.MeshBasicMaterial({
+      map: uiTexture,
+      transparent: true,
+      opacity: 0.96
+    });
+    const vrUiMesh = new THREE.Mesh(uiPlaneGeo, uiPlaneMat);
+    vrUiGroup.add(vrUiMesh);
+
+    // Define interactive 3D UI buttons in canvas pixel coordinates (1280 x 440)
+    let hoveredButtonId = null;
+    const vrButtons = [
+      // Row 1: Page Navigation & Layout
+      { id: 'prev',   label: '◀ Prev',         x: 40,   y: 125, w: 210, h: 86, accent: '#38bdf8' },
+      { id: 'next',   label: 'Next ▶',         x: 270,  y: 125, w: 210, h: 86, accent: '#38bdf8' },
+      { id: 'shift',  label: '+1 Shift',       x: 500,  y: 125, w: 210, h: 86, accent: '#fbbf24' },
+      { id: 'view',   label: 'Spread / 1P',    x: 730,  y: 125, w: 250, h: 86, accent: '#34d399' },
+      { id: 'dir',    label: 'R-to-L / L-to-R',x: 1000, y: 125, w: 240, h: 86, accent: '#a78bfa' },
+      // Row 2: 3D Depth, Scale, Reset, Hide UI
+      { id: 'depthM', label: 'Depth -',        x: 40,   y: 240, w: 170, h: 86, accent: '#e4e4e7' },
+      { id: 'depthP', label: 'Depth +',        x: 222,  y: 240, w: 170, h: 86, accent: '#e4e4e7' },
+      { id: 'sizeM',  label: 'Size -',         x: 404,  y: 240, w: 170, h: 86, accent: '#e4e4e7' },
+      { id: 'sizeP',  label: 'Size +',         x: 586,  y: 240, w: 170, h: 86, accent: '#e4e4e7' },
+      { id: 'dmap',   label: '3D / DepthMap',  x: 768,  y: 240, w: 205, h: 86, accent: '#fbbf24' },
+      { id: 'reset',  label: 'Reset',          x: 985,  y: 240, w: 130, h: 86, accent: '#f87171' },
+      { id: 'hide',   label: 'Hide (Y)',       x: 1125, y: 240, w: 115, h: 86, accent: '#94a3b8' }
+    ];
+
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    function renderVrUiTexture() {
+      const ctx = uiCtx;
+      ctx.clearRect(0, 0, 1280, 440);
+
+      // Panel Background
+      roundRect(ctx, 8, 8, 1264, 424, 32);
+      ctx.fillStyle = 'rgba(15, 15, 20, 0.94)';
+      ctx.fill();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#3f3f46';
+      ctx.stroke();
+
+      // Top Status Bar
+      ctx.fillStyle = '#f4f4f5';
+      ctx.font = 'bold 30px Inter, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const total = state.pages.length;
+      const curDisplay = total === 0 ? '0 / 0' : `${state.currentIndex + 1} / ${total}`;
+      ctx.fillText(`Page: ${curDisplay}`, 44, 65);
+
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = '600 26px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      const modeStr = `${state.spreadMode ? '2-Page Spread' : 'Single Page'}  •  ${state.rtl ? 'R→L (Manga)' : 'L→R'}`;
+      ctx.fillText(modeStr, 640, 65);
+
+      ctx.fillStyle = '#a1a1aa';
+      ctx.textAlign = 'right';
+      const dTag = state.showDepthMap ? 'DEPTH-MAP' : 'AI-3D';
+      ctx.fillText(`[${dTag}] Depth: ${state.depthStrength.toFixed(3)} | Scale: ${state.bookScale.toFixed(2)}x`, 1236, 65);
+
+      // Divider line
+      ctx.strokeStyle = '#27272a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(40, 102);
+      ctx.lineTo(1240, 102);
+      ctx.stroke();
+
+      // Draw Interactive Buttons
+      for (const btn of vrButtons) {
+        const isHovered = hoveredButtonId === btn.id;
+        roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 18);
+        ctx.fillStyle = isHovered ? '#27272a' : '#18181b';
+        ctx.fill();
+        ctx.lineWidth = isHovered ? 4 : 2.5;
+        ctx.strokeStyle = isHovered ? '#38bdf8' : btn.accent;
+        ctx.stroke();
+
+        ctx.fillStyle = isHovered ? '#ffffff' : '#f4f4f5';
+        ctx.font = 'bold 26px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+      }
+
+      // Footer Hint
+      ctx.fillStyle = '#71717a';
+      ctx.font = '22px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Point controller laser & pull Trigger to click  •  Press Y to toggle UI  •  Press B to Reset', 640, 385);
+
+      uiTexture.needsUpdate = true;
+    }
+
+    function executeVrButtonAction(id) {
+      switch (id) {
+        case 'prev':   prevSpread(); break;
+        case 'next':   nextSpread(); break;
+        case 'shift':  shiftOnePage(); break;
+        case 'view':   toggleViewMode(); break;
+        case 'dir':    toggleDirection(); break;
+        case 'depthM': setDepth(state.depthStrength - 0.01); break;
+        case 'depthP': setDepth(state.depthStrength + 0.01); break;
+        case 'sizeM':  setScale(state.bookScale - 0.1); break;
+        case 'sizeP':  setScale(state.bookScale + 0.1); break;
+        case 'dmap':   toggleDepthMapPreview(); break;
+        case 'reset':  resetTransform(); break;
+        case 'hide':   toggleVrUi(); break;
+      }
+      renderVrUiTexture();
+    }
+
+    // =========================================================================
+    // 6. QUEST 3 CONTROLLER LASER POINTERS (RAYCASTER)
+    // =========================================================================
+    const raycaster = new THREE.Raycaster();
+    const tempMatrix = new THREE.Matrix4();
+    const controllers = [];
+
+    function setupVRControllers() {
+      for (let i = 0; i < 2; i++) {
+        const controller = renderer.xr.getController(i);
+        // Laser ray line
+        const lineGeo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, 0),
+          new THREE.Vector3(0, 0, -2.5)
+        ]);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.85 });
+        const line = new THREE.Line(lineGeo, lineMat);
+        line.name = 'laser';
+        controller.add(line);
+
+        // Reticle dot at tip
+        const dot = new THREE.Mesh(
+          new THREE.SphereGeometry(0.012, 12, 12),
+          new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+        );
+        dot.name = 'reticle';
+        dot.visible = false;
+        controller.add(dot);
+
+        // Trigger select event for 3D spatial UI buttons
+        controller.addEventListener('selectstart', () => {
+          if (!state.vrUiVisible) return;
+          const hitBtn = getIntersectedVrButton(controller);
+          if (hitBtn) {
+            executeVrButtonAction(hitBtn.id);
+            state.lastTurnTime = performance.now(); // Prevent double page turn
+          }
+        });
+
+        scene.add(controller);
+        controllers.push(controller);
+      }
+    }
+    setupVRControllers();
+
+    function getIntersectedVrButton(controller) {
+      if (!state.vrUiVisible) return null;
+      tempMatrix.identity().extractRotation(controller.matrixWorld);
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+      const hits = raycaster.intersectObject(vrUiMesh, false);
+      const line = controller.getObjectByName('laser');
+      const dot = controller.getObjectByName('reticle');
+
+      if (hits.length > 0 && hits[0].uv) {
+        const hit = hits[0];
+        if (line) line.scale.z = hit.distance / 2.5;
+        if (dot) {
+          dot.visible = true;
+          dot.position.set(0, 0, -hit.distance);
+        }
+
+        const px = hit.uv.x * 1280;
+        const py = (1.0 - hit.uv.y) * 440;
+        for (const btn of vrButtons) {
+          if (px >= btn.x && px <= btn.x + btn.w && py >= btn.y && py <= btn.y + btn.h) {
+            return btn;
+          }
+        }
+      } else {
+        if (line) line.scale.z = 1;
+        if (dot) dot.visible = false;
+      }
+      return null;
+    }
+
+    // =========================================================================
+    // 7. PAGE LOADING, SPREAD LAYOUT & SHADER TEXTURE UPDATES
+    // =========================================================================
+    const textureLoader = new THREE.TextureLoader();
+
+    function loadPageTexture(pageObj, material, mesh, sideMode) {
+      if (!pageObj) {
+        material.uniforms.uHasTexture.value = 0.0;
+        material.uniforms.uHasDepth.value = 0.0;
+        mesh.visible = false;
+        return;
+      }
+      mesh.visible = true;
+
+      if (pageObj.depthTex) {
+        material.uniforms.uDepthMap.value = pageObj.depthTex;
+        material.uniforms.uHasDepth.value = 1.0;
+      } else {
+        material.uniforms.uHasDepth.value = 0.0;
+      }
+      material.uniforms.uShowDepthMap.value = state.showDepthMap ? 1.0 : 0.0;
+
+      textureLoader.load(pageObj.url, (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        material.uniforms.uMap.value = tex;
+        material.uniforms.uHasTexture.value = 1.0;
+        material.uniforms.uSide.value = sideMode;
+        material.uniforms.uCurve.value = state.spreadMode ? 0.045 : 0.018;
+        if (tex.image) {
+          material.uniforms.uTexelSize.value.set(1 / tex.image.width, 1 / tex.image.height);
+          const aspect = tex.image.width / tex.image.height;
+          const w = PAGE_HEIGHT * aspect;
+          mesh.scale.set(w, 1.0, 1.0);
+
+          if (!state.spreadMode) {
+            mesh.position.set(0, 0, 0.01);
+            mesh.rotation.y = 0;
+          } else if (sideMode > 0) {
+            mesh.position.set(w * 0.5 + 0.012, 0, 0.035);
+            mesh.rotation.y = -0.065;
+          } else {
+            mesh.position.set(-(w * 0.5 + 0.012), 0, 0.035);
+            mesh.rotation.y = 0.065;
+          }
+        }
+      });
+    }
+
+    function updateSpreadDisplay() {
+      const total = state.pages.length;
+      sync2DControls();
+      updateDepthStatusUI();
+      renderVrUiTexture();
+
+      if (total === 0) {
+        leftPageMesh.visible = false;
+        rightPageMesh.visible = false;
+        return;
+      }
+
+      // Trigger AI / Heuristic depth generation for visible pages
+      generateDepthForPage(state.pages[state.currentIndex]);
+      if (state.spreadMode && state.pages[state.currentIndex + 1]) {
+        generateDepthForPage(state.pages[state.currentIndex + 1]);
+      }
+
+      if (!state.spreadMode) {
+        leftPageMesh.visible = false;
+        loadPageTexture(state.pages[state.currentIndex], rightMat, rightPageMesh, 0.0);
+        return;
+      }
+
+      const p1 = state.pages[state.currentIndex] || null;
+      const p2 = state.pages[state.currentIndex + 1] || null;
+
+      if (state.rtl) {
+        loadPageTexture(p1, rightMat, rightPageMesh, 1.0);
+        loadPageTexture(p2, leftMat, leftPageMesh, -1.0);
+      } else {
+        loadPageTexture(p1, leftMat, leftPageMesh, -1.0);
+        loadPageTexture(p2, rightMat, rightPageMesh, 1.0);
+      }
+    }
+
+    function sync2DControls() {
+      const total = state.pages.length;
+      pageSlider.disabled = total === 0;
+      pageSlider.max = Math.max(0, total - 1);
+      pageSlider.value = state.currentIndex;
+
+      if (total === 0) {
+        pageBadge.textContent = '0 / 0';
+        sliderLabel.textContent = 'Page 0 / 0';
+        previewIndicator.textContent = 'No Comic Loaded';
+      } else {
+        const endIdx = state.spreadMode ? Math.min(state.currentIndex + 2, total) : state.currentIndex + 1;
+        const rangeStr = (state.spreadMode && endIdx > state.currentIndex + 1)
+          ? `${state.currentIndex + 1}–${endIdx} / ${total}`
+          : `${state.currentIndex + 1} / ${total}`;
+        pageBadge.textContent = rangeStr;
+        sliderLabel.textContent = `Page ${rangeStr}`;
+        previewIndicator.textContent = `Pages ${rangeStr} (${state.rtl ? '右開き R→L' : '左開き L→R'} • ${state.spreadMode ? '見開き' : '単ページ'} • ${state.showDepthMap ? 'Depth Map' : 'AI 3D'})`;
+      }
+
+      dirSelect.value = state.rtl ? 'rtl' : 'ltr';
+      viewSelect.value = state.spreadMode ? 'spread' : 'single';
+      aiModeSelect.value = state.aiMode;
+      depthMapToggleBtn.textContent = state.showDepthMap ? '3D Render: ON (Map)' : '3D Render: OFF (Map)';
+      depthSlider.value = state.depthStrength;
+      depthVal.textContent = state.depthStrength.toFixed(3);
+      scaleSlider.value = state.bookScale;
+      scaleVal.textContent = `${state.bookScale.toFixed(2)}x`;
+    }
+
+    // =========================================================================
+    // 8. NAVIGATION & PARAMETER ACTIONS
+    // =========================================================================
+    function nextSpread() {
+      if (state.pages.length === 0) return;
+      const step = state.spreadMode ? 2 : 1;
+      if (state.currentIndex + step < state.pages.length) {
+        state.currentIndex += step;
+        updateSpreadDisplay();
+      }
+    }
+
+    function prevSpread() {
+      if (state.pages.length === 0) return;
+      const step = state.spreadMode ? 2 : 1;
+      if (state.currentIndex - step >= 0) {
+        state.currentIndex -= step;
+        updateSpreadDisplay();
+      } else if (state.currentIndex > 0) {
+        state.currentIndex = 0;
+        updateSpreadDisplay();
+      }
+    }
+
+    function shiftOnePage() {
+      if (state.pages.length === 0) return;
+      if (state.currentIndex + 1 < state.pages.length) {
+        state.currentIndex += 1;
+      } else {
+        state.currentIndex = 0;
+      }
+      updateSpreadDisplay();
+    }
+
+    function toggleDirection() {
+      state.rtl = !state.rtl;
+      updateSpreadDisplay();
+    }
+
+    function toggleViewMode() {
+      state.spreadMode = !state.spreadMode;
+      updateSpreadDisplay();
+    }
+
+    function toggleDepthMapPreview() {
+      state.showDepthMap = !state.showDepthMap;
+      leftMat.uniforms.uShowDepthMap.value = state.showDepthMap ? 1.0 : 0.0;
+      rightMat.uniforms.uShowDepthMap.value = state.showDepthMap ? 1.0 : 0.0;
+      sync2DControls();
+      renderVrUiTexture();
+    }
+
+    function setDepth(val) {
+      state.depthStrength = THREE.MathUtils.clamp(val, 0.0, 0.14);
+      leftMat.uniforms.uDepth.value = state.depthStrength;
+      rightMat.uniforms.uDepth.value = state.depthStrength;
+      sync2DControls();
+      renderVrUiTexture();
+    }
+
+    function setScale(val) {
+      state.bookScale = THREE.MathUtils.clamp(val, 0.4, 2.5);
+      bookGroup.scale.setScalar(state.bookScale);
+      sync2DControls();
+      renderVrUiTexture();
+    }
+
+    function resetTransform() {
+      state.bookPos.copy(DEFAULT_POS);
+      bookGroup.position.copy(DEFAULT_POS);
+      bookGroup.rotation.set(0, 0, 0);
+      setScale(1.0);
+      setDepth(0.045);
+    }
+
+    function toggleVrUi() {
+      state.vrUiVisible = !state.vrUiVisible;
+      vrUiGroup.visible = state.vrUiVisible;
+    }
+
+    // =========================================================================
+    // 9. LOCAL ZIP EXTRACTION & PROCEDURAL DEMO COMIC GENERATOR
+    // =========================================================================
+    function clearCurrentPages() {
+      for (const p of state.pages) {
+        if (p.url && p.url.startsWith('blob:')) {
+          URL.revokeObjectURL(p.url);
+        }
+        if (p.depthTex) {
+          p.depthTex.dispose();
+        }
+      }
+      state.pages = [];
+      state.currentIndex = 0;
+    }
+
+    async function handleZipFile(file) {
+      if (!file) return;
+      statusText.textContent = `Extracting "${file.name}"...`;
+      statusText.className = 'text-amber-400 font-medium truncate max-w-[230px]';
+
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const entries = [];
+        zip.forEach((relPath, entry) => {
+          if (!entry.dir && !entry.name.includes('__MACOSX') && /\.(jpe?g|png|webp|gif|bmp)$/i.test(entry.name)) {
+            entries.push(entry);
+          }
+        });
+
+        // Natural alphanumeric sort (e.g., page2.jpg before page10.jpg)
+        entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+        if (entries.length === 0) {
+          statusText.textContent = 'Error: No images found inside ZIP';
+          statusText.className = 'text-rose-400 font-medium';
+          return;
+        }
+
+        clearCurrentPages();
+        for (const entry of entries) {
+          const blob = await entry.async('blob');
+          state.pages.push({
+            url: URL.createObjectURL(blob),
+            name: entry.name,
+            depthCanvas: null,
+            depthTex: null,
+            depthStatus: 'pending'
+          });
+        }
+
+        statusText.textContent = `Loaded: ${file.name} (${state.pages.length}p)`;
+        statusText.className = 'text-emerald-400 font-medium truncate max-w-[230px]';
+        updateSpreadDisplay();
+      } catch (err) {
+        console.error(err);
+        statusText.textContent = 'Error extracting archive';
+        statusText.className = 'text-rose-400 font-medium';
+      }
+    }
+
+    function generateDemoComic() {
+      clearCurrentPages();
+      const scenes = [
+        { title: 'EPISODE 01', sub: 'CYBER TOKYO 2099', bubble: 'Welcome to WebXR 3D!', accent: '#0ea5e9', bg: '#f8fafc' },
+        { title: 'PAGE 02', sub: 'STEREOSCOPIC DEPTH', bubble: 'Ink lines pop in 3D!', accent: '#f43f5e', bg: '#ffffff' },
+        { title: 'PAGE 03', sub: 'SPATIAL CONTROLS', bubble: 'Use Laser or Sticks!', accent: '#10b981', bg: '#f1f5f9' },
+        { title: 'PAGE 04', sub: 'QUEST 3 READY', bubble: 'Adjust depth anytime.', accent: '#8b5cf6', bg: '#ffffff' },
+        { title: 'PAGE 05', sub: 'RIGHT-TO-LEFT SPREAD', bubble: 'Manga & Comics supported!', accent: '#f59e0b', bg: '#f8fafc' },
+        { title: 'PAGE 06', sub: 'END OF DEMO', bubble: 'Load your own ZIP file!', accent: '#06b6d4', bg: '#ffffff' }
+      ];
+
+      scenes.forEach((item, idx) => {
+        const c = document.createElement('canvas');
+        c.width = 900;
+        c.height = 1272;
+        const ctx = c.getContext('2d');
+
+        // White manga paper background
+        ctx.fillStyle = item.bg;
+        ctx.fillRect(0, 0, c.width, c.height);
+
+        // Outer manga panel border
+        ctx.strokeStyle = '#09090b';
+        ctx.lineWidth = 14;
+        ctx.strokeRect(48, 48, c.width - 96, c.height - 96);
+
+        // Dynamic speedlines / halftone backdrop for strong 3D parallax contrast
+        ctx.save();
+        ctx.translate(c.width / 2, c.height * 0.45);
+        for (let i = 0; i < 48; i++) {
+          const angle = (i / 48) * Math.PI * 2;
+          ctx.strokeStyle = i % 2 === 0 ? '#cbd5e1' : '#94a3b8';
+          ctx.lineWidth = i % 3 === 0 ? 5 : 2;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(angle) * 140, Math.sin(angle) * 140);
+          ctx.lineTo(Math.cos(angle) * 560, Math.sin(angle) * 560);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // Foreground silhouette / geometric hero emblem (dark ink pops forward in 3D)
+        ctx.fillStyle = '#09090b';
+        ctx.beginPath();
+        ctx.arc(c.width / 2, c.height * 0.45, 165, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = item.accent;
+        ctx.beginPath();
+        ctx.moveTo(c.width / 2, c.height * 0.45 - 110);
+        ctx.lineTo(c.width / 2 + 105, c.height * 0.45 + 75);
+        ctx.lineTo(c.width / 2 - 105, c.height * 0.45 + 75);
+        ctx.closePath();
+        ctx.fill();
+
+        // Speech Bubble
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#09090b';
+        ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.ellipse(c.width / 2, 230, 290, 95, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#09090b';
+        ctx.font = 'bold 36px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(item.bubble, c.width / 2, 230);
+
+        // Lower Panel Caption Box
+        ctx.fillStyle = '#09090b';
+        ctx.fillRect(90, 900, c.width - 180, 240);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 54px Inter, sans-serif';
+        ctx.fillText(item.title, c.width / 2, 985);
+        ctx.fillStyle = item.accent;
+        ctx.font = 'bold 32px Inter, sans-serif';
+        ctx.fillText(item.sub, c.width / 2, 1065);
+
+        // Page Number Footer
+        ctx.fillStyle = '#52525b';
+        ctx.font = 'bold 26px Inter, sans-serif';
+        ctx.fillText(`- ${idx + 1} -`, c.width / 2, c.height - 24);
+
+        state.pages.push({
+          url: c.toDataURL('image/png'),
+          name: `demo_0${idx + 1}.png`,
+          depthCanvas: null,
+          depthTex: null,
+          depthStatus: 'pending'
+        });
+      });
+
+      statusText.textContent = 'Demo Comic Loaded (6 Pages)';
+      statusText.className = 'text-emerald-400 font-medium';
+      updateSpreadDisplay();
+    }
+
+    // =========================================================================
+    // 10. WEBXR SESSION & 2D EVENT LISTENERS
+    // =========================================================================
+    async function initWebXRSupport() {
+      if ('xr' in navigator) {
+        try {
+          const supported = await navigator.xr.isSessionSupported('immersive-vr');
+          if (supported) {
+            enterVrBtn.disabled = false;
+            enterVrBtn.className = 'w-full py-3.5 px-4 rounded-xl font-bold text-sm tracking-wide uppercase transition-all flex items-center justify-center gap-2.5 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 cursor-pointer shadow-lg shadow-emerald-500/20';
+            enterVrText.textContent = 'ENTER VR (WebXR)';
+            xrBadge.textContent = 'WebXR Ready';
+            xrBadge.className = 'text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30';
+            return;
+          }
+        } catch (e) {
+          console.warn('WebXR check failed:', e);
+        }
+      }
+      enterVrText.textContent = 'VR Unavailable (Requires Quest / HTTPS)';
+      xrBadge.textContent = 'Desktop Mode';
+    }
+
+    enterVrBtn.addEventListener('click', async () => {
+      if (state.isPresenting) {
+        const session = renderer.xr.getSession();
+        if (session) await session.end();
+        return;
+      }
+      try {
+        const session = await navigator.xr.requestSession('immersive-vr', {
+          optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+        });
+        session.addEventListener('end', () => {
+          state.isPresenting = false;
+          enterVrText.textContent = 'ENTER VR (WebXR)';
+        });
+        await renderer.xr.setSession(session);
+        state.isPresenting = true;
+        enterVrText.textContent = 'EXIT VR SESSION';
+      } catch (err) {
+        statusText.textContent = `VR Start Error: ${err.message}`;
+        statusText.className = 'text-rose-400 font-medium';
+      }
+    });
+
+    // File input & Drag-and-Drop
+    zipInput.addEventListener('change', (e) => handleZipFile(e.target.files[0]));
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('border-sky-400', 'bg-sky-950/20');
+    });
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('border-sky-400', 'bg-sky-950/20');
+    });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('border-sky-400', 'bg-sky-950/20');
+      if (e.dataTransfer.files.length > 0) {
+        handleZipFile(e.dataTransfer.files[0]);
+      }
+    dirSelect.addEventListener('change', (e) => {
+      state.rtl = e.target.value === 'rtl';
+      updateSpreadDisplay();
+    });
+    viewSelect.addEventListener('change', (e) => {
+      state.spreadMode = e.target.value === 'spread';
+      updateSpreadDisplay();
+    });
+    aiModeSelect.addEventListener('change', (e) => {
+      state.aiMode = e.target.value;
+      if (state.aiMode === 'ai') state.aiFailed = false;
+      // Clear cached depth so pages regenerate with selected engine
+      for (const p of state.pages) {
+        p.depthCanvas = null;
+        p.depthStatus = 'pending';
+      }
+      updateSpreadDisplay();
+    });
+    depthMapToggleBtn.addEventListener('click', toggleDepthMapPreview);
+    resetBtn.addEventListener('click', resetTransform);
+
+    pageSlider.addEventListener('input', (e) => {
+      state.currentIndex = parseInt(e.target.value, 10) || 0;
+      updateSpreadDisplay();
+    });
+    depthSlider.addEventListener('input', (e) => setDepth(parseFloat(e.target.value)));
+    scaleSlider.addEventListener('input', (e) => setScale(parseFloat(e.target.value)));
+
+    // Desktop Mouse / Touch Parallax Orbit Inspection
+    let isDragging = false;
+    let prevPointer = { x: 0, y: 0 };
+    previewStage.addEventListener('pointerdown', (e) => {
+      isDragging = true;
+      prevPointer = { x: e.clientX, y: e.clientY };
+    });
+    window.addEventListener('pointerup', () => { isDragging = false; });
+    window.addEventListener('pointermove', (e) => {
+      if (!isDragging || state.isPresenting) return;
+      const dx = (e.clientX - prevPointer.x) * 0.005;
+      const dy = (e.clientY - prevPointer.y) * 0.005;
+      bookGroup.rotation.y = THREE.MathUtils.clamp(bookGroup.rotation.y + dx, -0.65, 0.65);
+      bookGroup.rotation.x = THREE.MathUtils.clamp(bookGroup.rotation.x + dy, -0.45, 0.45);
+      prevPointer = { x: e.clientX, y: e.clientY };
+    });
+
+    // Keyboard shortcuts for desktop testing
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight') state.rtl ? prevSpread() : nextSpread();
+      if (e.key === 'ArrowLeft') state.rtl ? nextSpread() : prevSpread();
+    });
+
+    // =========================================================================
+    // 11. QUEST 3 CONTROLLER GAMEPAD POLLING & RENDER LOOP
+    // =========================================================================
+    let prevYPressed = false;
+    let prevBPressed = false;
+
+    function pollQuestControllers() {
+      const session = renderer.xr.getSession();
+      if (!session) return;
+
+      const now = performance.now();
+
+      // Update laser hover state for 3D UI
+      let activeHover = null;
+      for (const ctrl of controllers) {
+        const hit = getIntersectedVrButton(ctrl);
+        if (hit) activeHover = hit.id;
+      }
+      if (activeHover !== hoveredButtonId) {
+        hoveredButtonId = activeHover;
+        renderVrUiTexture();
+      }
+
+      for (const source of session.inputSources) {
+        if (!source.gamepad) continue;
+        const gp = source.gamepad;
+        const axes = gp.axes;
+        const buttons = gp.buttons;
+
+        if (source.handedness === 'right') {
+          // Next Spread: Right Trigger (0) or A button (4) (if not pointing at 3D UI)
+          const triggerOrA = buttons[0]?.pressed || buttons[4]?.pressed;
+          if (triggerOrA && !hoveredButtonId && (now - state.lastTurnTime > state.turnCooldown)) {
+            nextSpread();
+            state.lastTurnTime = now;
+          }
+
+          // +1 Page Shift: Right Grip (1)
+          if (buttons[1]?.pressed && (now - state.lastTurnTime > state.turnCooldown)) {
+            shiftOnePage();
+            state.lastTurnTime = now;
+          }
+
+          // Reset Transform: B button (5)
+          const bPressed = !!buttons[5]?.pressed;
+          if (bPressed && !prevBPressed) {
+            resetTransform();
+          }
+          prevBPressed = bPressed;
+
+          // Right Thumbstick Up/Down: 3D Parallax Depth
+          if (Math.abs(axes[3]) > 0.18) {
+            setDepth(state.depthStrength - axes[3] * 0.0015);
+          }
+
+          // Right Thumbstick Left/Right: Comic Scale
+          if (Math.abs(axes[2]) > 0.18) {
+            setScale(state.bookScale + axes[2] * 0.02);
+          }
+        }
+
+        if (source.handedness === 'left') {
+          // Previous Spread: Left Trigger (0) or X button (4)
+          const triggerOrX = buttons[0]?.pressed || buttons[4]?.pressed;
+          if (triggerOrX && !hoveredButtonId && (now - state.lastTurnTime > state.turnCooldown)) {
+            prevSpread();
+            state.lastTurnTime = now;
+          }
+
+          // Toggle Floating 3D VR UI: Y button (5)
+          const yPressed = !!buttons[5]?.pressed;
+          if (yPressed && !prevYPressed) {
+            toggleVrUi();
+          }
+          prevYPressed = yPressed;
+
+          // Left Thumbstick: Position X/Y, or Z distance if Left Grip (1) is held
+          if (Math.abs(axes[3]) > 0.18) {
+            if (buttons[1]?.pressed) {
+              bookGroup.position.z += axes[3] * 0.025;
+            } else {
+              bookGroup.position.y -= axes[3] * 0.02;
+            }
+          }
+          if (Math.abs(axes[2]) > 0.18) {
+            bookGroup.position.x += axes[2] * 0.02;
+          }
+        }
+      }
+    }
+
+    function handleResize() {
+      if (state.isPresenting) return;
+      const rect = previewStage.getBoundingClientRect();
+      const w = Math.max(1, rect.width);
+      const h = Math.max(1, rect.height);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+    }
+
+    window.addEventListener('resize', handleResize);
+    new ResizeObserver(handleResize).observe(previewStage);
+
+    // Initialize everything on load
+    window.addEventListener('load', () => {
+      handleResize();
+      initWebXRSupport();
+      generateDemoComic(); // Auto-load demo pages so user sees immediate 3D preview & can test VR right away
+      renderVrUiTexture();
+
+      renderer.setAnimationLoop(() => {
+        if (state.isPresenting) {
+          pollQuestControllers();
+        }
+        renderer.render(scene, camera);
+      });
+    });
+  </script>
+</body>
+</html>
