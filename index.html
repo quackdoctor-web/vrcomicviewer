@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quest 3 WebXR 3D Comic Reader</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #ui-container {
+      z-index: 10;
+      background: rgba(30, 30, 30, 0.9);
+      padding: 24px;
+      border-radius: 12px;
+      text-align: center;
+      max-width: 480px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    h1 { font-size: 1.4rem; margin-top: 0; }
+    p { font-size: 0.9rem; color: #ccc; line-height: 1.5; }
+    input[type="file"] {
+      margin: 16px 0;
+      padding: 10px;
+      background: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 6px;
+      color: #fff;
+      width: 90%;
+    }
+    #status { margin-top: 10px; font-weight: bold; color: #4fc3f7; }
+    .controls-info {
+      text-align: left;
+      font-size: 0.8rem;
+      background: #1e1e1e;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 16px;
+    }
+    .controls-info li { margin-bottom: 4px; }
+  </style>
+  <!-- Three.js & JSZip -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+
+<div id="ui-container">
+  <h1>WebXR 3D コミックリーダー</h1>
+  <p>Quest 3内のZIPファイルを選択し、下の「ENTER VR」ボタンを押してください。</p>
+  <input type="file" id="zip-input" accept=".zip,.cbz" />
+  <div id="status">ZIPファイルを選択してください</div>
+  
+  <div class="controls-info">
+    <strong>【VR内のコントローラー操作】</strong>
+    <ul>
+      <li><strong>右トリガー / Aボタン：</strong> 次の見開きへ</li>
+      <li><strong>左トリガー / Xボタン：</strong> 前の見開きへ</li>
+      <li><strong>右スティック上下：</strong> 3D立体感（奥行き）の強弱</li>
+      <li><strong>右スティック左右：</strong> 画面サイズの拡大・縮小</li>
+      <li><strong>左スティック上下左右：</strong> 画面の位置（高さ・距離）移動</li>
+      <li><strong>B / Yボタン：</strong> 位置とサイズをリセット</li>
+    </ul>
+  </div>
+</div>
+
+<script type="module">
+  import * as THREE from 'three';
+  import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+  // --- 変数定義 ---
+  let scene, camera, renderer;
+  let bookGroup, leftPageMesh, rightPageMesh;
+  let leftMat, rightMat;
+  let imageUrls = [];
+  let currentIndex = 0; // 0から開始（見開きで2枚ずつ進む）
+  
+  // 調整パラメータ
+  let depthStrength = 0.035; // 3D視差の強さ
+  let bookScale = 1.0;
+  let bookPos = new THREE.Vector3(0, 1.4, -1.8);
+
+  // コントローラー入力のクールダウン管理
+  let lastPageTurnTime = 0;
+  const TURN_COOLDOWN = 400; // ミリ秒
+
+  const statusEl = document.getElementById('status');
+  const zipInput = document.getElementById('zip-input');
+
+  // --- カスタムシェーダー（2D画像を擬似3D視差マッピングする） ---
+  const vertexShader = `
+    varying vec2 vUv;
+    varying vec3 vViewPosition;
+    void main() {
+      vUv = uv;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      vViewPosition = -mvPosition.xyz;
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    uniform sampler2D uMap;
+    uniform float uDepth;
+    uniform float uHasTexture;
+    varying vec2 vUv;
+    varying vec3 vViewPosition;
+
+    // 輝度と周辺コントラストから簡易的な奥行き（ハイトマップ）を計算
+    float getDepth(vec2 uv) {
+      vec4 tex = texture2D(uMap, uv);
+      // 漫画は白背景が多く、キャラや線が暗いため、暗い部分を手前に出す
+      float luma = dot(tex.rgb, vec3(0.299, 0.587, 0.114));
+      return 1.0 - luma; 
+    }
+
+    void main() {
+      if (uHasTexture < 0.5) {
+        gl_FragColor = vec4(0.1, 0.1, 0.1, 1.0);
+        return;
+      }
+
+      // 視線方向（左目・右目で自動的に変わる）に基づく視差オフセット
+      vec3 viewDir = normalize(vViewPosition);
+      float height = getDepth(vUv);
+      
+      // 視差遮蔽マッピング風のUVずらし（これにより両目で見た時に立体に見える）
+      vec2 parallaxOffset = viewDir.xy * (height * uDepth);
+      vec2 displacedUv = clamp(vUv + parallaxOffset, 0.001, 0.999);
+
+      vec4 color = texture2D(uMap, displacedUv);
+      gl_FragColor = color;
+    }
+  `;
+
+  // --- Three.js & WebXR 初期化 ---
+  function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a0c);
+
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.6, 0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // VRボタンを画面に追加
+    const vrButton = VRButton.createButton(renderer);
+    document.body.appendChild(vrButton);
+
+    // 見開きページ用のグループとメッシュ作成（日本の漫画仕様：右開き＝右が先、左が後）
+    bookGroup = new THREE.Group();
+    bookGroup.position.copy(bookPos);
+    scene.add(bookGroup);
+
+    const pageWidth = 1.0;
+    const pageHeight = 1.414; // A4/B5比率
+    const geometry = new THREE.PlaneGeometry(pageWidth, pageHeight, 32, 32);
+
+    leftMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: null },
+        uDepth: { value: depthStrength },
+        uHasTexture: { value: 0.0 }
+      },
+      vertexShader,
+      fragmentShader
+    });
+
+    rightMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: null },
+        uDepth: { value: depthStrength },
+        uHasTexture: { value: 0.0 }
+      },
+      vertexShader,
+      fragmentShader
+    });
+
+    // 見開きらしく少し内側に角度をつける（V字配置）
+    leftPageMesh = new THREE.Mesh(geometry, leftMat);
+    leftPageMesh.position.set(-pageWidth * 0.51, 0, 0.04);
+    leftPageMesh.rotation.y = 0.08;
+
+    rightPageMesh = new THREE.Mesh(geometry, rightMat);
+    rightPageMesh.position.set(pageWidth * 0.51, 0, 0.04);
+    rightPageMesh.rotation.y = -0.08;
+
+    bookGroup.add(leftPageMesh);
+    bookGroup.add(rightPageMesh);
+
+    // 周囲の空間把握用のグリッド床
+    const gridHelper = new THREE.GridHelper(10, 20, 0x333333, 0x1a1a1a);
+    scene.add(gridHelper);
+
+    window.addEventListener('resize', onWindowResize);
+    renderer.setAnimationLoop(render);
+  }
+
+  function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // --- ZIPファイルの解凍と画像リスト化 ---
+  zipInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    statusEl.textContent = "ZIPを解凍中...";
+    
+    // 古いURLを解放
+    imageUrls.forEach(url => URL.revokeObjectURL(url));
+    imageUrls = [];
+
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const validFiles = [];
+
+      zip.forEach((relativePath, zipEntry) => {
+        if (!zipEntry.dir && /\.(jpe?g|png|webp|gif)$/i.test(zipEntry.name) && !zipEntry.name.includes('__MACOSX')) {
+          validFiles.push(zipEntry);
+        }
+      });
+
+      // ファイル名順（自然順）にソート
+      validFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+      if (validFiles.length === 0) {
+        statusEl.textContent = "エラー: ZIP内に画像が見つかりません";
+        return;
+      }
+
+      for (const entry of validFiles) {
+        const blob = await entry.async('blob');
+        imageUrls.push(URL.createObjectURL(blob));
+      }
+
+      currentIndex = 0;
+      statusEl.textContent = `読み込み完了！全 ${imageUrls.length} ページ。「ENTER VR」を押してください。`;
+      updateSpread();
+
+    } catch (err) {
+      console.error(err);
+      statusEl.textContent = "ZIPの読み込みに失敗しました。";
+    }
+  });
+
+  // --- 見開きページのテクスチャ更新（右ページが若い番号、左ページが次の番号） ---
+  const textureLoader = new THREE.TextureLoader();
+
+  function updateSpread() {
+    if (imageUrls.length === 0) return;
+
+    // 右ページ (currentIndex)
+    if (currentIndex < imageUrls.length) {
+      textureLoader.load(imageUrls[currentIndex], (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        rightMat.uniforms.uMap.value = tex;
+        rightMat.uniforms.uHasTexture.value = 1.0;
+        adjustAspectRatio(rightPageMesh, tex.image);
+      });
+    } else {
+      rightMat.uniforms.uHasTexture.value = 0.0;
+    }
+
+    // 左ページ (currentIndex + 1)
+    if (currentIndex + 1 < imageUrls.length) {
+      textureLoader.load(imageUrls[currentIndex + 1], (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        leftMat.uniforms.uMap.value = tex;
+        leftMat.uniforms.uHasTexture.value = 1.0;
+        adjustAspectRatio(leftPageMesh, tex.image);
+      });
+    } else {
+      leftMat.uniforms.uHasTexture.value = 0.0;
+    }
+  }
+
+  function adjustAspectRatio(mesh, img) {
+    if (!img) return;
+    const aspect = img.width / img.height;
+    const baseHeight = 1.414;
+    const newWidth = baseHeight * aspect;
+    mesh.scale.set(newWidth, 1.0, 1.0);
+    
+    // 中央の綴じ目が重ならないように位置を微調整
+    if (mesh === rightPageMesh) {
+      mesh.position.x = (newWidth * 0.5) + 0.01;
+    } else {
+      mesh.position.x = -(newWidth * 0.5) - 0.01;
+    }
+  }
+
+  // --- WebXR コントローラー入力処理 ---
+  function handleXRControllers() {
+    const session = renderer.xr.getSession();
+    if (!session) return;
+
+    const now = performance.now();
+
+    for (const source of session.inputSources) {
+      if (!source.gamepad) continue;
+      const gp = source.gamepad;
+      const axes = gp.axes; // [2]: X軸, [3]: Y軸
+      const buttons = gp.buttons; // [0]: トリガー, [4]: A/Xボタン, [5]: B/Yボタン
+
+      // 右手コントローラー
+      if (source.handedness === 'right') {
+        // ページ送り（次へ）：トリガー or Aボタン
+        if ((buttons[0]?.pressed || buttons[4]?.pressed) && (now - lastPageTurnTime > TURN_COOLDOWN)) {
+          if (currentIndex + 2 < imageUrls.length) {
+            currentIndex += 2;
+            updateSpread();
+            lastPageTurnTime = now;
+          }
+        }
+        // リセット：Bボタン
+        if (buttons[5]?.pressed) {
+          resetTransform();
+        }
+        // 右スティック上下：3D深度（視差）調整
+        if (Math.abs(axes[3]) > 0.15) {
+          depthStrength = THREE.MathUtils.clamp(depthStrength - axes[3] * 0.001, 0.0, 0.15);
+          leftMat.uniforms.uDepth.value = depthStrength;
+          rightMat.uniforms.uDepth.value = depthStrength;
+        }
+        // 右スティック左右：拡大・縮小
+        if (Math.abs(axes[2]) > 0.15) {
+          bookScale = THREE.MathUtils.clamp(bookScale + axes[2] * 0.02, 0.3, 3.5);
+          bookGroup.scale.setScalar(bookScale);
+        }
+      }
+
+      // 左手コントローラー
+      if (source.handedness === 'left') {
+        // ページ戻し（前へ）：トリガー or Xボタン
+        if ((buttons[0]?.pressed || buttons[4]?.pressed) && (now - lastPageTurnTime > TURN_COOLDOWN)) {
+          if (currentIndex - 2 >= 0) {
+            currentIndex -= 2;
+            updateSpread();
+            lastPageTurnTime = now;
+          }
+        }
+        // リセット：Yボタン
+        if (buttons[5]?.pressed) {
+          resetTransform();
+        }
+        // 左スティック上下：高さ移動（押し込みながらなら前後距離移動）
+        if (Math.abs(axes[3]) > 0.15) {
+          if (buttons[1]?.pressed) { // グリップボタン押しながらで前後（距離）移動
+            bookGroup.position.z += axes[3] * 0.03;
+          } else {
+            bookGroup.position.y -= axes[3] * 0.02;
+          }
+        }
+        // 左スティック左右：左右位置移動
+        if (Math.abs(axes[2]) > 0.15) {
+          bookGroup.position.x += axes[2] * 0.02;
+        }
+      }
+    }
+  }
+
+  function resetTransform() {
+    depthStrength = 0.035;
+    bookScale = 1.0;
+    bookGroup.position.set(0, 1.4, -1.8);
+    bookGroup.scale.setScalar(1.0);
+    leftMat.uniforms.uDepth.value = depthStrength;
+    rightMat.uniforms.uDepth.value = depthStrength;
+  }
+
+  function render() {
+    handleXRControllers();
+    renderer.render(scene, camera);
+  }
+
+  init();
+</script>
+</body>
+</html>
